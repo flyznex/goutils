@@ -22,6 +22,9 @@ type (
 		IdentityServerURI string
 		MethodSignature   string
 	}
+	AuthManager struct {
+		Validator *gois.JWTValidator
+	}
 )
 type contextKey struct {
 	name string
@@ -38,6 +41,52 @@ func New(cfg ConfigAuth) *AuthModel {
 		Issuer:          cfg.Issuer,
 		Options:         gois.JWKClientOptions{URI: cfg.IdentityServerURI},
 		MethodSignature: m,
+	}
+}
+
+// NewAuthManager create new AuthManager instance
+func NewAuthManager(cfg ConfigAuth) *AuthManager {
+	m := jose.RS256
+	if cfg.MethodSignature != "" {
+		m = jose.SignatureAlgorithm(cfg.MethodSignature)
+	}
+	authClient := gois.NewJWKClient(gois.JWKClientOptions{URI: cfg.IdentityServerURI}, nil)
+	configuration := gois.NewConfiguration(authClient, cfg.Audiences, cfg.Issuer, m)
+	validator := gois.NewValidator(configuration, nil)
+	return &AuthManager{
+		Validator: validator,
+	}
+}
+
+func (am *AuthManager) Authenticate() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		hfn := func(w http.ResponseWriter, r *http.Request) {
+			token, err := am.Validator.ValidateRequest(r)
+			if err != nil {
+				http.Error(w, http.StatusText(401), 401)
+				return
+			}
+			ctx := r.Context()
+			//ctx = NewContext(ctx, token, err)
+			ctx = context.WithValue(ctx, TokenKey, token)
+			claims := map[string]interface{}{}
+			err = am.Validator.Claims(token, &claims)
+			if err != nil {
+				http.Error(w, http.StatusText(401), 401)
+				return
+			}
+			ctx = context.WithValue(ctx, IdentityKey, claims)
+			roles := getRoleFromClaims(claims)
+			ctx = context.WithValue(ctx, RolesKey, roles)
+			userID, ok := getUserIDFromClaims(claims)
+			if !ok {
+				http.Error(w, http.StatusText(401), 401)
+				return
+			}
+			ctx = context.WithValue(ctx, UserIDKey, userID)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		}
+		return http.HandlerFunc(hfn)
 	}
 }
 
@@ -85,8 +134,6 @@ func Authenticator(auth *AuthModel) func(http.Handler) http.Handler {
 	}
 }
 
-
-
 func RequireRoles(roles ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -111,7 +158,6 @@ func RequireRoles(roles ...string) func(http.Handler) http.Handler {
 	}
 }
 
-
 func GetUserNameFromContext(ctx context.Context) string {
 	claimsCtx := ctx.Value(IdentityKey)
 	if claimsCtx == nil {
@@ -125,7 +171,6 @@ func GetUserNameFromContext(ctx context.Context) string {
 	return name.(string)
 }
 
-
 func GetUserIDFromContext(ctx context.Context) string {
 	userId := ctx.Value(UserIDKey)
 	if userId == nil {
@@ -133,6 +178,7 @@ func GetUserIDFromContext(ctx context.Context) string {
 	}
 	return userId.(string)
 }
+
 // internal functions
 func getUserIDFromClaims(claims map[string]interface{}) (string, bool) {
 	sub, ok := claims["sub"]
