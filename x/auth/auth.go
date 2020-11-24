@@ -3,9 +3,11 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/flyznex/gois"
 	jose "gopkg.in/square/go-jose.v2"
+	"gopkg.in/square/go-jose.v2/jwt"
 )
 
 //AuthModel auth model context
@@ -61,38 +63,45 @@ func NewAuthManager(cfg ConfigAuth) *AuthManager {
 func (am *AuthManager) Authenticate() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		hfn := func(w http.ResponseWriter, r *http.Request) {
+			raw := ""
+			if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[0:7], "BEARER ") {
+				raw = h[7:]
+			}
+			if raw == "" {
+				http.Error(w, http.StatusText(401), 401)
+				return
+			}
+			ctx := context.WithValue(r.Context(), JWTToken, raw)
 			token, err := am.Validator.ValidateRequest(r)
 			if err != nil {
 				http.Error(w, http.StatusText(401), 401)
 				return
 			}
-			ctx := r.Context()
-			//ctx = NewContext(ctx, token, err)
 			ctx = context.WithValue(ctx, TokenKey, token)
-			claims := map[string]interface{}{}
-			err = am.Validator.Claims(token, &claims)
-			if err != nil {
-				http.Error(w, http.StatusText(401), 401)
-				return
-			}
-			ctx = context.WithValue(ctx, IdentityKey, claims)
-			roles := getRoleFromClaims(claims)
-			ctx = context.WithValue(ctx, RolesKey, roles)
-			userID, ok := getUserIDFromClaims(claims)
-			if !ok {
-				http.Error(w, http.StatusText(401), 401)
-				return
-			}
-			ctx = context.WithValue(ctx, UserIDKey, userID)
+			ctx = buildContextWithValue(ctx, am, token)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		}
 		return http.HandlerFunc(hfn)
 	}
 }
+func buildContextWithValue(ctx context.Context, am *AuthManager, token *jwt.JSONWebToken) context.Context {
+	claims := map[string]interface{}{}
+	err := am.Validator.Claims(token, &claims)
+	if err != nil {
+		return ctx
+	}
+	ctx = context.WithValue(ctx, IdentityKey, claims)
+	roles := getRoleFromClaims(claims)
+	ctx = context.WithValue(ctx, RolesKey, roles)
+	userID := getUserIDFromClaims(claims)
+	ctx = context.WithValue(ctx, UserIDKey, userID)
+	return ctx
+}
 
 // Context keys
 var (
 	TokenKey    = &contextKey{"Token"}
+	JWTToken    = &contextKey{"JWTToken"}
 	IdentityKey = &contextKey{"Identity"}
 	UserIDKey   = &contextKey{"UserID"}
 	RolesKey    = &contextKey{"Roles"}
@@ -122,11 +131,7 @@ func Authenticator(auth *AuthModel) func(http.Handler) http.Handler {
 			ctx = context.WithValue(ctx, IdentityKey, claims)
 			roles := getRoleFromClaims(claims)
 			ctx = context.WithValue(ctx, RolesKey, roles)
-			userID, ok := getUserIDFromClaims(claims)
-			if !ok {
-				http.Error(w, http.StatusText(401), 401)
-				return
-			}
+			userID := getUserIDFromClaims(claims)
 			ctx = context.WithValue(ctx, UserIDKey, userID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		}
@@ -180,12 +185,12 @@ func GetUserIDFromContext(ctx context.Context) string {
 }
 
 // internal functions
-func getUserIDFromClaims(claims map[string]interface{}) (string, bool) {
+func getUserIDFromClaims(claims map[string]interface{}) string {
 	sub, ok := claims["sub"]
 	if !ok {
-		return "", false
+		return ""
 	}
-	return sub.(string), ok
+	return sub.(string)
 }
 
 func getRoleFromClaims(claims map[string]interface{}) map[string]string {
